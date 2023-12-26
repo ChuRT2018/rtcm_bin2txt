@@ -215,24 +215,29 @@ static int outssr_brdc(const nav_t* nav,const int ephsat, const int ephset, char
 	return 1;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
+	if (argc != 3) {
+		printf("arg error, should be <ssrfilepath> <outpath> ");
+		return 0;
+	}
 	rtcm_t rtcm;
 	init_rtcm(&rtcm);
 	FILE* fpin = NULL, *fpout = NULL;
-	int idata;
-	int rtcmtype = 0,ret;
-	uint8_t data;
+	uint8_t databuff[BUFFSIZE];
+	int rtcmtype = 0,ret,nr,i;
 	unsigned int totalnr = 0;
 	char* longbuff = NULL;
 	double refep[6] = { 2023,12,22,0,0,0 };
 	double epcur[6];
 	char rcvtime[32];
 	rtcm.time = epoch2time(refep);
-	if (!(fpin = fopen("C:\\Users\\CHRT_\\Desktop\\20231222\\runway\\out\\runway.rnx.merge.ssr","rb"))) {
+	if (!(fpin = fopen(argv[1], "rb"))) {
+		printf("infile <%s> open error", argv[1]);
 		return 0;
 	}
-	if (!(fpout = fopen("C:\\Users\\CHRT_\\Desktop\\20231222\\runway\\out\\runway.rnx.merge.ssr.txt", "w"))) {
+	if (!(fpout = fopen(argv[2], "w"))) {
+		printf("outfile <%s> open error", argv[2]);
 		return 0;
 	}
 	
@@ -242,106 +247,108 @@ int main()
 	rtcm.nbyte = 0;
 	totalnr = 0;
 	//while ( 0 < (nr = (int)fread(buff, sizeof(char), BUFFSIZE, fpin))) {
-	while((idata=fgetc(fpin)) != EOF){
-		data = (uint8_t)idata;
-		totalnr += 1;
+	while(!feof(fpin)){
+		nr = fread(databuff, sizeof(char), BUFFSIZE, fpin);
+		
+		totalnr += nr;
 		if (totalnr > 1073741824u) {
 			break;
 		}
 		
-		if (rtcm.nbyte == 0) {
-			if (data != RTCM3PREAMB) 
+		for (i = 0; i < nr; ++i) {
+			if (rtcm.nbyte == 0) {
+				if (databuff[i] != RTCM3PREAMB)
+				{
+					continue;
+				}
+				rtcm.buff[rtcm.nbyte++] = databuff[i];
+				continue;
+			}
+			rtcm.buff[rtcm.nbyte++] = databuff[i];
+
+			if (rtcm.nbyte == 3) {
+				rtcm.len = getbitu(rtcm.buff, 14, 10) + 3; /* length without parity */
+			}
+			if (rtcm.nbyte == 5) {
+				rtcmtype = getbitu(rtcm.buff, 24, 12);
+			}
+			if (rtcm.nbyte < 3 || rtcm.nbyte < rtcm.len + 3)
 			{
 				continue;
 			}
-			rtcm.buff[rtcm.nbyte++] = data;
-			continue;
-		}
-		rtcm.buff[rtcm.nbyte++] = data;
+			rtcm.nbyte = 0;
 
-		if (rtcm.nbyte == 3) {
-			rtcm.len = getbitu(rtcm.buff, 14, 10) + 3; /* length without parity */
-		}
-		if (rtcm.nbyte == 5) {
-			rtcmtype = getbitu(rtcm.buff, 24, 12);
-		}
-		if (rtcm.nbyte < 3 || rtcm.nbyte < rtcm.len + 3) 
-		{
-			continue;
-		}
-		rtcm.nbyte = 0;
+			/* check parity */
+			if (rtk_crc24q(rtcm.buff, rtcm.len) != getbitu(rtcm.buff, rtcm.len * 8, 24)) {
+				trace(2, "rtcm3 parity error: len=%d\n", rtcm.len);
+				continue;
+			}
+			/* decode rtcm3 message */
+			ret = decode_rtcm3(&rtcm);
 
-		/* check parity */
-		if (rtk_crc24q(rtcm.buff, rtcm.len) != getbitu(rtcm.buff, rtcm.len * 8, 24)) {
-			trace(2, "rtcm3 parity error: len=%d\n", rtcm.len);
-			continue;
-		}
-		/* decode rtcm3 message */
-		ret = decode_rtcm3(&rtcm);
-		
-		time2epoch(rtcm.time, epcur);
-		if (ret <= 0) {
-			continue;
-		}
-			
-		//printf("read %d\n", rtcmtype);
-		strcpy(rcvtime, time_str(rtcm.time, 3));
-		printf("%s\r", rcvtime);
-		//code bias
-		fprintf(fpout,"%% %s\n", rcvtime);
-		if(rtcmtype == 1059 || rtcmtype == 1065 || rtcmtype == 1242 || rtcmtype == 1260){
-			if(!outssr_cbias(rtcm.ssr, longbuff, MAXSAT)){
-				printf("message out of buffsize \n");
+			time2epoch(rtcm.time, epcur);
+			if (ret <= 0) {
+				continue;
 			}
-			else{
-				fprintf(fpout, "%s", longbuff);
+
+			//printf("read %d\n", rtcmtype);
+			strcpy(rcvtime, time_str(rtcm.time, 3));
+			printf("%s\r", rcvtime);
+			//code bias
+			fprintf(fpout, "%% %s\n", rcvtime);
+			if (rtcmtype == 1059 || rtcmtype == 1065 || rtcmtype == 1242 || rtcmtype == 1260) {
+				if (!outssr_cbias(rtcm.ssr, longbuff, MAXSAT)) {
+					printf("message out of buffsize \n");
+				}
+				else {
+					fprintf(fpout, "%s", longbuff);
+				}
 			}
-		}
-		//orbit
-		else if (rtcmtype == 1057 || rtcmtype == 1063 || rtcmtype == 1240 || rtcmtype == 1258) {
-			if (!outssr_orb(rtcm.ssr, longbuff, MAXSAT)) {
-				printf("message out of buffsize \n");
+			//orbit
+			else if (rtcmtype == 1057 || rtcmtype == 1063 || rtcmtype == 1240 || rtcmtype == 1258) {
+				if (!outssr_orb(rtcm.ssr, longbuff, MAXSAT)) {
+					printf("message out of buffsize \n");
+				}
+				else {
+					fprintf(fpout, "%s", longbuff);
+				}
 			}
-			else {
-				fprintf(fpout, "%s", longbuff);
+			//clk
+			else if (rtcmtype == 1058 || rtcmtype == 1064 || rtcmtype == 1241 || rtcmtype == 1259) {
+				if (!outssr_clk(rtcm.ssr, longbuff, MAXSAT)) {
+					printf("message out of buffsize \n");
+				}
+				else {
+					fprintf(fpout, "%s", longbuff);
+				}
 			}
-		}
-		//clk
-		else if (rtcmtype == 1058 || rtcmtype == 1064 || rtcmtype == 1241 || rtcmtype == 1259) {
-			if (!outssr_clk(rtcm.ssr, longbuff, MAXSAT)) {
-				printf("message out of buffsize \n");
+			//combined orbit and clk
+			else if (rtcmtype == 1060 || rtcmtype == 1066 || rtcmtype == 1243 || rtcmtype == 1261) {
+				if (!outssr_orbclk(rtcm.ssr, longbuff, MAXSAT)) {
+					printf("message out of buffsize \n");
+				}
+				else {
+					fprintf(fpout, "%s", longbuff);
+				}
 			}
-			else {
-				fprintf(fpout, "%s", longbuff);
+			//observation  msm5 
+			else if (rtcmtype == 1075 || rtcmtype == 1085 || rtcmtype == 1095 || rtcmtype == 1125) {
+				if (!outssr_obsmsm5(rtcm.obs.data, rtcm.obs.n, longbuff)) {
+					printf("message out of buffsize \n");
+				}
+				else {
+					fprintf(fpout, "%s", longbuff);
+				}
 			}
-		}
-		//combined orbit and clk
-		else if(rtcmtype == 1060 || rtcmtype == 1066 || rtcmtype == 1243 || rtcmtype == 1261){
-			if(!outssr_orbclk(rtcm.ssr, longbuff, MAXSAT)){
-				printf("message out of buffsize \n");
-			}
-			else{
-				fprintf(fpout, "%s", longbuff);
-			}
-		}
-		//observation  msm5 
-		else if (rtcmtype == 1075 || rtcmtype == 1085 || rtcmtype == 1095 || rtcmtype == 1125) {
-			if (!outssr_obsmsm5(rtcm.obs.data,rtcm.obs.n, longbuff)) {
-				printf("message out of buffsize \n");
-			}
-			else {
-				fprintf(fpout, "%s", longbuff);
-			}
-		}
-		else if (rtcmtype == 1019 || rtcmtype == 1020 || rtcmtype == 1042 || rtcmtype == 1045 || rtcmtype == 1046) {
-			if (!outssr_brdc(&rtcm.nav,rtcm.ephsat,rtcm.ephset,longbuff)) {
-				printf("message out of buffsize \n");
-			}
-			else {
-				fprintf(fpout, "%s", longbuff);
+			else if (rtcmtype == 1019 || rtcmtype == 1020 || rtcmtype == 1042 || rtcmtype == 1045 || rtcmtype == 1046) {
+				if (!outssr_brdc(&rtcm.nav, rtcm.ephsat, rtcm.ephset, longbuff)) {
+					printf("message out of buffsize \n");
+				}
+				else {
+					fprintf(fpout, "%s", longbuff);
+				}
 			}
 		}
-		
 	}
 	fclose(fpin);
 	fclose(fpout);
